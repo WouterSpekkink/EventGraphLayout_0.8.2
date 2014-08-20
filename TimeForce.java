@@ -1,0 +1,466 @@
+/*
+ Copyright 2008-2011 Gephi
+ Authors : Mathieu Jacomy <mathieu.jacomy@gmail.com>
+ Website : http://www.gephi.org
+
+ This file is part of Gephi.
+
+ DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS HEADER.
+
+ Copyright 2011 Gephi Consortium. All rights reserved.
+
+ The contents of this file are subject to the terms of either the GNU
+ General Public License Version 3 only ("GPL") or the Common
+ Development and Distribution License("CDDL") (collectively, the
+ "License"). You may not use this file except in compliance with the
+ License. You can obtain a copy of the License at
+ http://gephi.org/about/legal/license-notice/
+ or /cddl-1.0.txt and /gpl-3.0.txt. See the License for the
+ specific language governing permissions and limitations under the
+ License.  When distributing the software, include this License Header
+ Notice in each file and include the License files at
+ /cddl-1.0.txt and /gpl-3.0.txt. If applicable, add the following below the
+ License Header, with the fields enclosed by brackets [] replaced by
+ your own identifying information:
+ "Portions Copyrighted [year] [name of copyright owner]"
+
+ If you wish your version of this file to be governed by only the CDDL
+ or only the GPL Version 3, indicate your decision by adding
+ "[Contributor] elects to include this software in this distribution
+ under the [CDDL or GPL Version 3] license." If you do not indicate a
+ single choice of license, a recipient has the option to distribute
+ your version of this file under either the CDDL, the GPL Version 3 or
+ to extend the choice of license to its licensees as provided above.
+ However, if you add GPL Version 3 code and therefore, elected the GPL
+ Version 3 license, then the option applies only if the new code is
+ made subject to such option by the copyright holder.
+
+ Contributor(s): Wouter Spekkink
+ Contribution: Most of the code is from the original Force Atlas 2 source code
+ Some changes were made to change the way that nodes are laid out in the x-axis
+ The x-axis layout is now based on a variable that should be submitted by the
+ user. The approach used to implement this was inspired by the source dode
+ of the GeoLayout plugin.
+
+ Portions Copyrighted 2011 Gephi Consortium.
+ */
+
+package org.wouterspekkink.eventgraphlayout;
+
+import java.util.ArrayList;
+import java.util.List;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import org.gephi.data.attributes.api.AttributeColumn;
+import org.gephi.data.attributes.api.AttributeController;
+import org.gephi.data.attributes.api.AttributeModel;
+import org.gephi.data.attributes.api.AttributeRow;
+import org.gephi.graph.api.Edge;
+import org.gephi.graph.api.Graph;
+import org.gephi.graph.api.GraphModel;
+import org.gephi.graph.api.Node;
+import org.gephi.layout.spi.Layout;
+import org.gephi.layout.spi.LayoutBuilder;
+import org.gephi.layout.spi.LayoutProperty;
+import org.gephi.ui.propertyeditor.NodeColumnNumbersEditor;
+import org.openide.util.Exceptions;
+import org.openide.util.Lookup;
+import org.wouterspekkink.eventgraphlayout.ForceFactory.AttractionForce;
+import org.wouterspekkink.eventgraphlayout.ForceFactory.RepulsionForce;
+
+/**
+ *
+ * @author wouterspekkink
+ */
+public class TimeForce implements Layout {
+    private GraphModel graphModel;
+    private Graph graph;
+    private final TimeForceBuilder layoutBuilder;
+    private double jitterTolerance;
+    private double scalingRatio;
+    private double orderScale;
+    private AttributeColumn order;
+    private double gravity;
+    private double speed;
+    private boolean strongGravityMode;
+    private int threadCount;
+    private int currentThreadCount;
+    private ExecutorService pool;
+    private boolean vertical;
+    private boolean center;
+    
+    
+    public TimeForce(TimeForceBuilder layoutBuilder) {
+        this.layoutBuilder = layoutBuilder;
+        this.threadCount = Math.min(4, Math.max(1, Runtime.getRuntime().availableProcessors() - 1));
+    }
+    
+    @Override
+    public void initAlgo() {
+        speed = 1.;
+
+        graph = graphModel.getGraphVisible();
+
+        graph.readLock();
+        Node[] nodes = graph.getNodes().toArray();
+
+        // Initialise layout data
+        for (Node n : nodes) {
+            if (n.getNodeData().getLayoutData() == null || !(n.getNodeData().getLayoutData() instanceof TimeForceLayoutData)) {
+                TimeForceLayoutData nLayout = new TimeForceLayoutData();
+                n.getNodeData().setLayoutData(nLayout);
+            }
+            TimeForceLayoutData nLayout = n.getNodeData().getLayoutData();
+            nLayout.mass = 1 + graph.getDegree(n);
+            nLayout.old_dx = 0;
+            nLayout.old_dy = 0;
+            nLayout.dx = 0;
+            nLayout.dy = 0;
+        }
+        pool = Executors.newFixedThreadPool(threadCount);
+        currentThreadCount = threadCount;
+    }
+    @Override
+    public void goAlgo() {
+        // Initialize graph data
+        if (graphModel == null) {
+            return;
+        }
+        graph = graphModel.getGraphVisible();
+
+        graph.readLock();
+        Node[] nodes = graph.getNodes().toArray();
+        Edge[] edges = graph.getEdges().toArray();
+
+        // Initialise layout data
+        for (Node n : nodes) {
+            if (n.getNodeData().getLayoutData() == null || !(n.getNodeData().getLayoutData() instanceof TimeForceLayoutData)) {
+                TimeForceLayoutData nLayout = new TimeForceLayoutData();
+                n.getNodeData().setLayoutData(nLayout);
+            }
+            TimeForceLayoutData nLayout = n.getNodeData().getLayoutData();
+            nLayout.mass = 1 + graph.getDegree(n);
+            nLayout.old_dx = nLayout.dx;
+            nLayout.old_dy = nLayout.dy;
+            nLayout.dx = 0;
+            nLayout.dy = 0;
+        }
+        // Repulsion (and gravity)
+        // NB: Muti-threaded
+        RepulsionForce Repulsion = ForceFactory.builder.buildRepulsion(getScalingRatio());
+
+        int taskCount = 8 * currentThreadCount;  // The threadPool Executor Service will manage the fetching of tasks and threads.
+        // We make more tasks than threads because some tasks may need more time to compute.
+        ArrayList<Future> threads = new ArrayList();
+        for (int t = taskCount; t > 0; t--) {
+            int from = (int) Math.floor(nodes.length * (t - 1) / taskCount);
+            int to = (int) Math.floor(nodes.length * t / taskCount);
+            Future future = pool.submit(new NodesThread(nodes, from, to, getGravity(), (isStrongGravityMode()) ? (ForceFactory.builder.getStrongGravity(getScalingRatio())) : (Repulsion), getScalingRatio(), Repulsion));
+            threads.add(future);
+        }
+        for (Future future : threads) {
+            try {
+                future.get();
+            } catch (InterruptedException ex) {
+                Exceptions.printStackTrace(ex);
+            } catch (ExecutionException ex) {
+                Exceptions.printStackTrace(ex);
+            }
+        }
+        
+        //Attraction
+        AttractionForce Attraction = ForceFactory.builder.buildAttraction(1);
+        for (Edge e : edges) {
+                Attraction.apply(e.getSource(), e.getTarget(), 1);
+            }
+        // Auto adjust speed
+        double totalSwinging = 0d;  // How much irregular movement
+        double totalEffectiveTraction = 0d;  // Hom much useful movement
+        for (Node n : nodes) {
+            TimeForceLayoutData nLayout = n.getNodeData().getLayoutData();
+            if (!n.getNodeData().isFixed()) {
+                double swinging = Math.sqrt(Math.pow(nLayout.old_dx - nLayout.dx, 2) + Math.pow(nLayout.old_dy - nLayout.dy, 2));
+                totalSwinging += nLayout.mass * swinging;   // If the node has a burst change of direction, then it's not converging.
+                totalEffectiveTraction += nLayout.mass * 0.5 * Math.sqrt(Math.pow(nLayout.old_dx + nLayout.dx, 2) + Math.pow(nLayout.old_dy + nLayout.dy, 2));
+            }
+        }
+        // We want that swingingMovement < tolerance * convergenceMovement
+        double targetSpeed = getJitterTolerance() * getJitterTolerance() * totalEffectiveTraction / totalSwinging;
+
+        // But the speed shoudn't rise too much too quickly, since it would make the convergence drop dramatically.
+        double maxRise = 0.5;   // Max rise: 50%
+        speed = speed + Math.min(targetSpeed - speed, maxRise * speed);
+        
+        //Apply Forces
+        for (Node n : nodes) {
+            AttributeRow row = (AttributeRow) n.getNodeData().getAttributes();
+            TimeForceLayoutData nLayout = n.getNodeData().getLayoutData();
+            if (!n.getNodeData().isFixed()) {
+
+                // Adaptive auto-speed: the speed of each node is lowered
+                // when the node swings.
+                double swinging = Math.sqrt((nLayout.old_dx - nLayout.dx) * (nLayout.old_dx - nLayout.dx) + (nLayout.old_dy - nLayout.dy) * (nLayout.old_dy - nLayout.dy));
+                //double factor = speed / (1f + Math.sqrt(speed * swinging));
+                double factor = speed / (1f + speed * Math.sqrt(swinging));
+
+                double x = n.getNodeData().x() + nLayout.dx * factor;
+                double y = n.getNodeData().y() + nLayout.dy * factor;
+                
+                double averageX = 0;
+                double averageY = 0;
+
+                float ord = getFloatValue(n, order);
+                ord = ord * (float) orderScale;
+                    
+                n.getNodeData().setX(ord);
+                if (vertical == true) {
+                    n.getNodeData().setY((float) y);
+                } else {
+                    n.getNodeData().setY(n.getNodeData().y());
+                }
+                
+                if (center == true) {
+                    averageX += x;
+                    averageY += y;
+                
+                    averageX = averageX/nodes.length;
+                    averageY = averageY/nodes.length;
+                
+                    x = n.getNodeData().x() - averageX;
+                    y = n.getNodeData().y() - averageY;
+
+                    n.getNodeData().setX((float) x);
+                    n.getNodeData().setY((float) y);
+                }
+            
+            }
+            
+        }
+        
+        graph.readUnlockAll();
+    }
+        
+public float getFloatValue(Node node, AttributeColumn column) {
+    return ((Number) node.getNodeData().getAttributes().getValue(column.getIndex())).floatValue();
+    }
+
+@Override
+    public boolean canAlgo() {
+        return graphModel != null;
+    }
+
+    @Override
+    public void endAlgo() {
+        for (Node n : graph.getNodes()) {
+            n.getNodeData().setLayoutData(null);
+        }
+        pool.shutdown();
+        graph.readUnlockAll();
+    }
+    
+    @Override
+    public LayoutProperty[] getProperties() {
+        List<LayoutProperty> properties = new ArrayList<LayoutProperty>();
+        final String TIMEFORCE =  "Time Force Layout";
+        
+        try {
+            properties.add(LayoutProperty.createProperty(
+                    this, Double.class,
+                    "Scale of Order",
+                    TIMEFORCE,
+                    "Determines the separation of the nodes on the x-axis",
+                    "getOrderScale", "setOrderScale"));
+            properties.add(LayoutProperty.createProperty(
+                    this, AttributeColumn.class,
+                    "Order",
+                    TIMEFORCE,
+                    "Selects the attribute that indicates the order of events",
+                    "getOrder", "setOrder", NodeColumnNumbersEditor.class));
+            properties.add(LayoutProperty.createProperty(
+                    this, Boolean.class,
+                    "Set Vertical Force",
+                    TIMEFORCE,
+                    "Used to push unconnected groups of nodes away from each other",
+                    "isVertical", "setVertical"));
+            properties.add(LayoutProperty.createProperty(
+                    this, Double.class,
+                    "Vertical Scale",
+                    TIMEFORCE,
+                    "Sets the strength of the vertical force",
+                    "getScalingRatio", "setScalingRatio"));
+            properties.add(LayoutProperty.createProperty(
+                    this, Boolean.class,
+                    "Strong Gravity Mode",
+                    TIMEFORCE,
+                    "Sets the strong gravity mode",
+                    "isStrongGravityMode", "setStrongGravityMode"));
+            properties.add(LayoutProperty.createProperty(
+                    this, Double.class,
+                    "Gravity",
+                    TIMEFORCE,
+                    "Pulls nodes to origin of the y-axis. Prevents islands from drifting away.",
+                    "getGravity", "setGravity"));
+            properties.add(LayoutProperty.createProperty(
+                    this, Double.class,
+                    "Jitter Tolerance",
+                    TIMEFORCE,
+                    "How much swiging you allow.",
+                    "getJitterTolerance", "setJitterTolerance"));
+            properties.add(LayoutProperty.createProperty(
+                    this, Integer.class,
+                    "Threads",
+                    TIMEFORCE,
+                    "Possibility to use more threads if your cores can handle it.",
+                    "getThreadsCount", "setThreadsCount"));
+            properties.add(LayoutProperty.createProperty(
+                    this, Boolean.class,
+                    "Center",
+                    TIMEFORCE,
+                    "Centers the graph",
+                    "isCenter", "setCenter"));
+
+        } catch (Exception e) {
+            e.printStackTrace();
+        }
+
+        return properties.toArray(new LayoutProperty[0]);
+    }
+    
+    @Override
+    public void resetPropertiesValues() {
+        AttributeModel attModel = Lookup.getDefault().lookup(AttributeController.class).getModel();
+       for (AttributeColumn c : attModel.getNodeTable().getColumns()) {
+           if(c.getId().equalsIgnoreCase("order")
+                   || c.getId().equalsIgnoreCase("ord")
+                   || c.getTitle().equalsIgnoreCase("order")
+                   || c.getTitle().equalsIgnoreCase("ord")) {
+               order = c;
+           }
+       }
+        int nodesCount = 0;
+
+        if (graphModel != null) {
+            nodesCount = graphModel.getGraphVisible().getNodeCount();
+        }
+
+        setOrderScale(5.0);
+        
+        // Tuning
+        setScalingRatio(3.0);
+        
+        setStrongGravityMode(false);
+        setGravity(1.);
+        
+        setVertical(false);
+        setCenter(false);
+
+        // Performance
+        if (nodesCount >= 50000) {
+            setJitterTolerance(10d);
+        } else if (nodesCount >= 5000) {
+            setJitterTolerance(1d);
+        } else {
+            setJitterTolerance(0.1d);
+        }
+
+        setThreadsCount(2);
+    }
+    
+    @Override
+    public LayoutBuilder getBuilder() {
+        return layoutBuilder;
+    }
+
+    @Override
+    public void setGraphModel(GraphModel graphModel) {
+        this.graphModel = graphModel;
+        // Trick: reset here to take the profile of the graph in account for default values
+        resetPropertiesValues();
+    }
+    
+    public Double getJitterTolerance() {
+        return jitterTolerance;
+    }
+
+    public void setJitterTolerance(Double jitterTolerance) {
+        this.jitterTolerance = jitterTolerance;
+    }
+    
+    public Double getScalingRatio() {
+        return scalingRatio;
+    }
+
+    public void setScalingRatio(Double scalingRatio) {
+        this.scalingRatio = scalingRatio;
+    }
+
+    public Boolean isStrongGravityMode() {
+        return strongGravityMode;
+    }
+
+    public void setStrongGravityMode(Boolean strongGravityMode) {
+        this.strongGravityMode = strongGravityMode;
+    }
+    
+    public Boolean isVertical() {
+        return vertical;
+    }
+    
+    public void setVertical(Boolean vertical) {
+        this.vertical = vertical;
+    }
+
+    public Boolean isCenter() {
+        return center;
+    }
+    
+    public void setCenter(Boolean center) {
+        this.center = center;
+    }
+    
+    public Double getGravity() {
+        return gravity;
+    }
+
+    public void setGravity(Double gravity) {
+        this.gravity = gravity;
+    }
+
+    public Integer getThreadsCount() {
+        return threadCount;
+    }
+
+    public void setThreadsCount(Integer threadCount) {
+        if (threadCount < 1) {
+            setThreadsCount(1);
+        } else {
+            this.threadCount = threadCount;
+        }
+    }
+    
+    public Double getOrderScale() {
+        return orderScale;
+    }
+    
+    public void setOrderScale(Double orderScale) {
+        this.orderScale = orderScale;
+    }
+    
+    public AttributeColumn getOrder() {
+        return order;
+    }
+
+    public void setOrder(AttributeColumn order) {
+       this.order = order;
+    }
+
+
+
+}
+        
+
+
+
+
