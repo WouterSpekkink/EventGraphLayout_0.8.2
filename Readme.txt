@@ -19,3 +19,4 @@ An example of an application of the layout plugin is used in a forthcoming publi
 Spekkink, W.A.H. (forthcoming). Building Capacity for Sustainable Regional Industrial Systems: 
 An Event Sequence Analysis of Developments in the Sloe Area and Canal Zone. 
 Accepted for publication in the Journal of Cleaner Production.
+Available online at: http://www.sciencedirect.com/science/article/pii/S0959652614008506
