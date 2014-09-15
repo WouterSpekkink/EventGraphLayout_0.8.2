@@ -49,6 +49,7 @@ package org.wouterspekkink.eventgraphlayout;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Vector;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -95,6 +96,7 @@ public class TimeForce implements Layout {
     public TimeForce(TimeForceBuilder layoutBuilder) {
         this.layoutBuilder = layoutBuilder;
         this.threadCount = Math.min(4, Math.max(1, Runtime.getRuntime().availableProcessors() - 1));
+        resetPropertiesValues();
     }
     
     @Override
@@ -142,10 +144,11 @@ public class TimeForce implements Layout {
             }
             TimeForceLayoutData nLayout = n.getNodeData().getLayoutData();
             nLayout.mass = 1 + graph.getDegree(n);
-            nLayout.old_dx = nLayout.dx;
-            nLayout.old_dy = nLayout.dy;
             nLayout.dx = 0;
             nLayout.dy = 0;
+            nLayout.old_dx = nLayout.dx;
+            nLayout.old_dy = nLayout.dy;
+
         }
         // Repulsion (and gravity)
         // NB: Muti-threaded
@@ -193,8 +196,19 @@ public class TimeForce implements Layout {
         double maxRise = 0.5;   // Max rise: 50%
         speed = speed + Math.min(targetSpeed - speed, maxRise * speed);
         
+        Vector<Node> validNodes = new Vector<Node>();
+        Vector<Node> unvalidNodes = new Vector<Node>();
+        
         //Apply Forces
         for (Node n : nodes) {
+            AttributeRow row = (AttributeRow) n.getNodeData().getAttributes();
+            if(row.getValue(order)!=null){
+                validNodes.add(n);
+            } else {
+                unvalidNodes.add(n);
+            }
+        }
+        for (Node n: validNodes) {
             AttributeRow row = (AttributeRow) n.getNodeData().getAttributes();
             TimeForceLayoutData nLayout = n.getNodeData().getLayoutData();
             if (!n.getNodeData().isFixed()) {
@@ -233,6 +247,7 @@ public class TimeForce implements Layout {
 
                     n.getNodeData().setX((float) x);
                     n.getNodeData().setY((float) y);
+                    
                 }
             
             }
@@ -248,7 +263,7 @@ public float getFloatValue(Node node, AttributeColumn column) {
 
 @Override
     public boolean canAlgo() {
-        return graphModel != null;
+        return graphModel != null && order != null;
     }
 
     @Override
@@ -330,13 +345,15 @@ public float getFloatValue(Node node, AttributeColumn column) {
     
     @Override
     public void resetPropertiesValues() {
-        AttributeModel attModel = Lookup.getDefault().lookup(AttributeController.class).getModel();
+       AttributeModel attModel = Lookup.getDefault().lookup(AttributeController.class).getModel();
        for (AttributeColumn c : attModel.getNodeTable().getColumns()) {
            if(c.getId().equalsIgnoreCase("order")
                    || c.getId().equalsIgnoreCase("ord")
                    || c.getTitle().equalsIgnoreCase("order")
                    || c.getTitle().equalsIgnoreCase("ord")) {
                order = c;
+           } else {
+               order = null;
            }
        }
         int nodesCount = 0;
