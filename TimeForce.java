@@ -91,7 +91,7 @@ public class TimeForce implements Layout {
     private ExecutorService pool;
     private boolean vertical;
     private boolean center;
-    
+   
     
     public TimeForce(TimeForceBuilder layoutBuilder) {
         this.layoutBuilder = layoutBuilder;
@@ -123,6 +123,10 @@ public class TimeForce implements Layout {
         }
         pool = Executors.newFixedThreadPool(threadCount);
         currentThreadCount = threadCount;
+                
+        
+        
+
     }
     @Override
     public void goAlgo() {
@@ -135,7 +139,19 @@ public class TimeForce implements Layout {
         graph.readLock();
         Node[] nodes = graph.getNodes().toArray();
         Edge[] edges = graph.getEdges().toArray();
+        
+        Vector<Node> validNodes = new Vector<Node>();; 
+        Vector<Node> unvalidNodes = new Vector<Node>();;
 
+        for (Node n : nodes) {
+           AttributeRow row = (AttributeRow) n.getNodeData().getAttributes();
+            if(row.getValue(order)!=null){
+                validNodes.add(n);
+            } else {
+                unvalidNodes.add(n);
+            }
+        }
+          
         // Initialise layout data
         for (Node n : nodes) {
             if (n.getNodeData().getLayoutData() == null || !(n.getNodeData().getLayoutData() instanceof TimeForceLayoutData)) {
@@ -196,18 +212,7 @@ public class TimeForce implements Layout {
         double maxRise = 0.5;   // Max rise: 50%
         speed = speed + Math.min(targetSpeed - speed, maxRise * speed);
         
-        Vector<Node> validNodes = new Vector<Node>();
-        Vector<Node> unvalidNodes = new Vector<Node>();
-        
-        //Apply Forces
-        for (Node n : nodes) {
-            AttributeRow row = (AttributeRow) n.getNodeData().getAttributes();
-            if(row.getValue(order)!=null){
-                validNodes.add(n);
-            } else {
-                unvalidNodes.add(n);
-            }
-        }
+        // Apply Forces 
         for (Node n: validNodes) {
             AttributeRow row = (AttributeRow) n.getNodeData().getAttributes();
             TimeForceLayoutData nLayout = n.getNodeData().getLayoutData();
@@ -362,10 +367,10 @@ public float getFloatValue(Node node, AttributeColumn column) {
             nodesCount = graphModel.getGraphVisible().getNodeCount();
         }
 
-        setOrderScale(5.0);
+        setOrderScale(10.0);
         
         // Tuning
-        setScalingRatio(3.0);
+        setScalingRatio(1.0);
         
         setStrongGravityMode(false);
         setGravity(1.);
@@ -379,10 +384,13 @@ public float getFloatValue(Node node, AttributeColumn column) {
         } else if (nodesCount >= 5000) {
             setJitterTolerance(1d);
         } else {
-            setJitterTolerance(0.1d);
+            setJitterTolerance(0.3d);
         }
 
         setThreadsCount(2);
+        
+
+        
     }
     
     @Override
